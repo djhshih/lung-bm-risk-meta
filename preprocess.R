@@ -1,6 +1,10 @@
 library(io);
 library(dplyr);
 library(rstan);
+library(MCMCpack);   # rdirichlet
+
+out.fname <- filename("lung-bm-risk");
+pdf.fname <- insert(out.fname, ext="pdf");
 
 x <- qread("lung-bm-incidence-meta.tsv", stringsAsFactors=FALSE);
 
@@ -180,7 +184,7 @@ data <- list(
 	alpha_sex = rep(1, ncol(X_sex)),
 	X_type = X_type,
 	X_stage = X_stage,
-	X_age = X_stage,
+	X_age = X_age,
 	X_egfr = X_egfr,
 	X_race = X_race,
 	X_smoker = X_smoker,
@@ -189,6 +193,7 @@ data <- list(
 
 str(data)
 
+#fit4 <- qread("lung-bm-risk-meta_fit4.rds");
 fit4 <- stan("random-effects_binomial_regression_evm.stan", data = data);
 
 mu <- extract(fit4, "mu")[[1]];
@@ -199,23 +204,272 @@ quantile(lmu, c(0.025, 0.25, 0.5, 0.75, 0.975))
 plot(fit4, pars=c("mu", "tau"));
 
 covariates <- c("type", "stage", "age", "egfr", "race", "smoker", "sex");
-plot(fit4, pars=c(paste0("beta_", covariates)));
+
+# between-study effect dominates all fixed effects
+qdraw(
+	{
+		plot(fit4, pars=c("tau", paste0("beta_", covariates)))
+	},
+	file = insert(pdf.fname, "covars")
+);
 
 stan_scat(fit4, pars=c("mu", "beta_type[1]"))
 stan_scat(fit4, pars=c("mu", "beta_type[2]"))
 stan_scat(fit4, pars=c("mu", "beta_stage[1]"))
 stan_scat(fit4, pars=c("mu", "beta_stage[2]"))
+stan_scat(fit4, pars=c("mu", "beta_age[1]"))
+stan_scat(fit4, pars=c("mu", "beta_age[2]"))
+stan_scat(fit4, pars=c("mu", "beta_egfr[1]"))
+stan_scat(fit4, pars=c("mu", "beta_race[1]"))
+stan_scat(fit4, pars=c("mu", "beta_race[2]"))
+stan_scat(fit4, pars=c("mu", "beta_race[3]"))
+stan_scat(fit4, pars=c("mu", "beta_smoker[1]"))
+stan_scat(fit4, pars=c("mu", "beta_sex[1]"))
 
 stan_scat(fit4, pars=c("tau", "beta_type[1]"))
 stan_scat(fit4, pars=c("tau", "beta_type[2]"))
 stan_scat(fit4, pars=c("tau", "beta_stage[1]"))
-stan_scat(fit4, pars=c("tau", "beta_sage[2]"))
+stan_scat(fit4, pars=c("tau", "beta_stage[2]"))
+stan_scat(fit4, pars=c("tau", "beta_age[1]"))
+stan_scat(fit4, pars=c("tau", "beta_age[2]"))
+stan_scat(fit4, pars=c("tau", "beta_egfr[1]"))
+stan_scat(fit4, pars=c("tau", "beta_race[1]"))
+stan_scat(fit4, pars=c("tau", "beta_race[2]"))
+stan_scat(fit4, pars=c("tau", "beta_race[3]"))
+stan_scat(fit4, pars=c("tau", "beta_smoker[1]"))
+stan_scat(fit4, pars=c("tau", "beta_sex[1]"))
+
+
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_type[1]"))
+
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_age[1]"))
+stan_scat(fit4, pars=c("beta_stage[2]", "beta_age[2]"))
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_age[2]"))
+stan_scat(fit4, pars=c("beta_stage[2]", "beta_age[1]"))
+
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_egfr[1]"))
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_race[1]"))
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_smoker[1]"))
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_sex[1]"))
+
+stan_scat(fit4, pars=c("beta_stage[1]", "beta_stage[2]"))
+stan_scat(fit4, pars=c("beta_age[1]", "beta_age[2]"))
+stan_scat(fit4, pars=c("beta_race[1]", "beta_race[2]"))
+stan_scat(fit4, pars=c("beta_race[1]", "beta_race[3]"))
+
+param.names <- c("mu", "tau", paste0("beta_", covariates));
+
+# mu +/- tau
+# beta_type * logit(pi_type)
+
+params <- extract(fit4, pars=param.names);
+
+# only take covariate values from first study as an example
+inputs <- list(
+	X_type = data$X_type[1, ],
+	X_stage = data$X_stage[1, ],
+	X_age = data$X_age[1, ],
+	X_egfr = data$X_egfr[1, ],
+	X_race = data$X_race[1, ],
+	X_smoker = data$X_smoker[1, ],
+	X_sex = data$X_sex[1, ]
+);
+
+hparams <- list(
+	alpha_type = data$alpha_type,
+	alpha_stage = data$alpha_stage,
+	alpha_age = data$alpha_age,
+	alpha_egfr = data$alpha_egfr,
+	alpha_race = data$alpha_race,
+	alpha_smoker = data$alpha_smoker,
+	alpha_sex = data$alpha_sex
+);
+
+# convert vector into a column vector (i.e. matrix with 1 column)
+column_vector <- function(x) {
+	matrix(x, nrow=length(x))
+}
+
+#' @return a p x 1 column vector where p is the dimension of x
+transform_covariates <- function(x, alpha) {
+	z <- x + alpha;
+	# first beta is assumed to be fixed at 0
+	column_vector(logit(z[-1] / sum(z)))
+}
+
+#' @return a n by p matrix where n is the number of random samples
+#'         and p is dimension of x
+transform_uncertain_covariates <- function(x, alpha, n) {
+	alpha2 <- x + alpha;
+	Z <- rdirichlet(n, alpha2);
+	# first beta is assumed to be fixed at 0
+	logit(Z[, -1] / rowSums(Z))
+}
+
+n.samples <- length(params$mu);
+
+# inputs are based on first study
+# so covars and ucovars are both based on the first study as well
+covars <- mapply(transform_covariates, inputs, hparams);
+ucovars <- mapply(transform_uncertain_covariates, inputs, hparams, n.samples);
+
+qs <- c(0.025, 0.5, 0.975);
+z <- extract(fit4, "z")[[1]];
+
+betas <- with(params, list(
+	beta_type,
+	beta_stage,
+	beta_age,
+	beta_egfr,
+	beta_race,
+	beta_smoker,
+	beta_sex
+));
+
+quantile(
+	logistic(
+		params$mu
+	), qs
+)
+
+# calculate theta0 for a new data point from the first study
+quantile(
+	logistic(
+		params$mu + z[, 1] * params$tau
+	), qs
+)
+
+beta_covar_product <- function(betas, covars) {
+	rowSums(mapply("%*%", betas, covars))
+}
+
+# calculate theta for new data point with some setting of covars
+# (e.g. from first study) based on population mean,
+# but ignoring uncertainty in covariates
+quantile(
+	logistic(
+		params$mu + beta_covar_product(betas, covars)
+	), qs
+)
+
+beta_ucovar_product <- function(betas, ucovars) {
+	rowSums(mapply(
+		function(beta, x) {
+			rowSums(beta * x)
+		}, betas, ucovars
+	))
+}
+
+# calculate theta for new data point with some setting of covars
+# (e.g. from first study) based on population mean
+quantile(
+	logistic(
+		params$mu + beta_ucovar_product(betas, ucovars)
+	), qs
+)
+
+# new data point for first study with some setting some of covars,
+# ignoring uncertainty in covariates
+quantile(
+	logistic(
+		params$mu + z[,1] * params$tau + beta_covar_product(betas, covars)
+	), qs
+)
+
+# new data point for first study with some setting some of covars
+quantile(
+	logistic(
+		params$mu + z[,1] * params$tau + beta_ucovar_product(betas, ucovars)
+	), qs
+)
+
+# calculate theta0 indirectly, ignoring uncertainty in covariates
+quantile(
+	logistic(
+		theta1 - beta_covar_product(betas, covars)
+	), qs
+)
+
+theta_1 <- extract(fit4, "theta[1]")[[1]];
+z_1 <- extract(fit4, "z[1]")[[1]];
+
+# theta of first study at the observed covariates
+quantile(
+	logistic(theta_1), qs
+)
+
+# calculate theta0 indirectly for first study
+quantile(
+	logistic(
+		theta_1 - beta_ucovar_product(betas, ucovars)
+	), qs
+)
+
+# calculate theta0 more directly for first study
+quantile(
+	logistic(
+		params$mu + z_1 * params$tau
+	), qs
+)
+
+stan_scat(fit4, c("tau", "z[1]"))
+
+####
 
 thetas <- extract(fit4, "theta")[[1]];
+
 lthetas <- logistic(thetas);
 summary(lthetas)
 boxplot(lthetas)
 d$theta <- colMeans(lthetas);
+
+plot(d$period_start, d$theta)
+plot(d$period_end, d$theta)
+plot((d$period_start + d$period_end) / 2, d$theta)
+
+summary(lm(theta ~ period_start, data=d))
+
+
+theta0s <- as.numeric(params$mu) + as.numeric(params$tau) * z;
+ltheta0s <- logistic(theta0s);
+boxplot(ltheta0s)
+d$theta0 <- colMeans(ltheta0s);
+d$theta0_lower = apply(ltheta0s, 2, quantile, probs=0.1);
+d$theta0_upper = apply(ltheta0s, 2, quantile, probs=0.9);
+
+d$period_mid <- 0.5 * (d$period_start + d$period_end);
+
+d.main <- filter(d, !duplicated(pmid));
+
+with(d.main, plot(period_start, theta0))
+with(d.main, plot(period_end, theta0))
+with(d.main, plot((period_start + period_end) / 2, theta0))
+
+library(ggplot2);
+
+qdraw(
+	ggplot(d.main, aes(x = period_start, xend = period_end, y = theta0, yend = theta0)) +
+		geom_segment() + theme_bw() +
+		geom_pointrange(aes(x = period_mid, y = theta0, ymin = theta0_lower, ymax=theta0_upper))
+	,
+	width = 7,
+	file = insert(pdf.fname, c("period-vs-theta0", "cross"))
+);
+
+qdraw(
+	ggplot(d.main, aes(x = period_mid, y = theta0)) +
+		geom_point() +
+		geom_smooth(method="lm") + theme_bw()
+	,
+	width = 7,
+	file = insert(pdf.fname, c("period-vs-theta0", "lm"))
+);
+
+filter(d.main, theta0 > 0.4)
+
+filter(d, pmid == 22733536)
+
+####
 
 transmute(d,
 	study, cancer_type,
