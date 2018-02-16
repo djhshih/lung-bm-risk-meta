@@ -1,10 +1,11 @@
 library(io);
+library(MCMCpack);   # rdirichlet
 library(dplyr);
 library(rstan);
-library(MCMCpack);   # rdirichlet
 
 out.fname <- filename("lung-bm-risk");
 pdf.fname <- insert(out.fname, ext="pdf");
+rds.fname <- insert(out.fname, ext="rds");
 
 x <- qread("lung-bm-incidence-meta.tsv", stringsAsFactors=FALSE);
 
@@ -192,9 +193,11 @@ data <- list(
 );
 
 str(data)
+qwrite(data, insert(rds.fname, "data"));
 
-#fit4 <- qread("lung-bm-risk-meta_fit4.rds");
+#fit4 <- qread("lung-bm-risk_fit4.rds");
 fit4 <- stan("random-effects_binomial_regression_evm.stan", data = data);
+qwrite(fit4, insert(rds.fname, "fit4"));
 
 mu <- extract(fit4, "mu")[[1]];
 logistic(mean(mu))
@@ -284,6 +287,9 @@ hparams <- list(
 	alpha_smoker = data$alpha_smoker,
 	alpha_sex = data$alpha_sex
 );
+
+qwrite(params, insert(rds.fname, tag="params"));
+qwrite(hparams, insert(rds.fname, tag="hparams"));
 
 # convert vector into a column vector (i.e. matrix with 1 column)
 column_vector <- function(x) {
